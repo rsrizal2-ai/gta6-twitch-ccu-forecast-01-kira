@@ -48,6 +48,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import NormalDist
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -69,42 +70,24 @@ SD_MULT = 1.1
 SD_FLOOR = 0.15
 BEYOND_SLOPE = 0.5
 BASELINE_SIGMA = 0.15
+# Sanity rails on the fitted log ratio.  Observed pool ratios sit well
+# inside these; the rails only bind on degenerate inputs (e.g. a
+# missing hour-1 print), where an extrapolated line could run away.
+MU_MIN = -2.5
+MU_MAX = 3.5
 
 
 # --- small numeric helpers -------------------------------------------------
 
 def norm_ppf(p):
-    """Inverse standard normal CDF (Acklam's rational approximation).
+    """Inverse standard normal CDF, from the standard library.
 
-    Accurate to ~1e-9 absolute, far tighter than this forecast needs.
+    statistics.NormalDist is exact to float precision; no hand-rolled
+    rational approximation to mistype.
     """
     if not 0.0 < p < 1.0:
         raise ValueError("p must be in (0, 1)")
-    a = (-3.969683028665376e01, 2.209460984245205e02,
-         -2.759285984469534e02, 1.383577518672690e02,
-         -3.066479806614716e01, 2.506628277459239e00)
-    b = (-5.447609879822406e01, 1.615858368580409e02,
-         -1.556989798598866e02, 6.680131188771972e01,
-         -1.328068155288572e01)
-    c = (-7.784894002430293e-03, -3.223964580411365e-01,
-         -2.400758277161838e00, -2.549732539343734e00,
-         4.374664141464968e00, 2.938163982698783e00)
-    d = (7.784695709041462e-03, 3.224671290700398e-01,
-         2.445134137142996e00, 3.754408661907416e00)
-    plow = 0.02425
-    phigh = 1.0 - plow
-    if p < plow:
-        q = math.sqrt(-2.0 * math.log(p))
-        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
-            ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
-    if p <= phigh:
-        q = p - 0.5
-        r = q * q
-        return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / \
-            (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
-    q = math.sqrt(-2.0 * math.log(1.0 - p))
-    return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
-        ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+    return NormalDist().inv_cdf(p)
 
 
 def round2_half_up(x):
@@ -294,6 +277,7 @@ def fit_forecast(pool, p1, hours, z_values):
         a, b, resid_sd = _weighted_line(xs, ys, ws)
         sd = max(resid_sd * SD_MULT, SD_FLOOR)
         mu = a + b * lx_clipped + BEYOND_SLOPE * b * (lx - lx_clipped)
+        mu = min(max(mu, MU_MIN), MU_MAX)
         quantiles = [p1 * math.exp(mu + z * sd) for z in z_values]
         rows.append({"hour": h, "q": clamp_quantiles(quantiles)})
     return rows
@@ -306,6 +290,7 @@ def pooled_forecast(pool, p1, hours, z_values):
         ratios = [math.log(max(c["day"][h - 1], 1.0) / max(c["day"][0], 1.0))
                   for c in pool]
         mu = _median(ratios)
+        mu = min(max(mu, MU_MIN), MU_MAX)
         if len(ratios) > 1:
             mean = sum(ratios) / len(ratios)
             sd = math.sqrt(sum((r - mean) ** 2 for r in ratios) / len(ratios))
